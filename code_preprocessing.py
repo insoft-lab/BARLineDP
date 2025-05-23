@@ -44,7 +44,6 @@ def create_code_df(code_str, filename):
     is_comments = []
     is_blank_line = []
 
-    # match comment lines
     comments = re.findall(r'(/\*[\s\S]*?\*/)', code_str, re.DOTALL)
     comments_str = '\n'.join(comments)
     comments_list = comments_str.split('\n')
@@ -54,7 +53,6 @@ def create_code_df(code_str, filename):
         is_comment = is_comment_line(l, comments_list)
         is_comments.append(is_comment)
 
-        # preprocess non-comment lines
         if not is_comment:
             l = preprocess_code_line(l)
             
@@ -112,8 +110,8 @@ def code_preprocess(proj_name):
         print('finish release {}'.format(rel))
 
 if  __name__ == '__main__':
-    original_data_dir = 'datasets/original/'
-    save_dir = "datasets/preprocessed_data/"
+    original_data_dir = '../datasets/original/'
+    save_dir = "../datasets/preprocessed_data/"
 
     char_to_remove = ['+', '-', '*', '/', '=', '++', '--', '\\', '<str>', '<char>', '|', '&', '!']
 

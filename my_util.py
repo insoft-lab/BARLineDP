@@ -32,7 +32,7 @@ all_releases = {'activemq': ['activemq-5.0.0', 'activemq-5.1.0', 'activemq-5.2.0
                 'lucene': ['lucene-2.3.0', 'lucene-2.9.0', 'lucene-3.0.0', 'lucene-3.1'],
                 'wicket': ['wicket-1.3.0-incubating-beta-1', 'wicket-1.3.0-beta2', 'wicket-1.5.3']}
 
-file_lvl_gt = 'datasets/preprocessed_data/'
+file_lvl_gt = '../datasets/preprocessed_data/'
 
 
 def get_df(rel, is_baseline=False):

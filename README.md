@@ -1,4 +1,6 @@
-# BARLineDP: Enhancing Line-Level Defect Prediction Using Bilinear Attention Fusion and Ranking Optimization
+# Enhancing Line-Level Defect Prediction Using Bilinear Attention Fusion and Ranking Optimization
+
+This paper has been accepted in the journal of Empirical Software Engineering (EMSE 2025).
 
 ## Datasets
 The datasets utilized in our study are sourced from Wattanakriengkrai et al., containing 32 releases across 9 software projects. For access to the datasets, please refer to this [github](https://github.com/awsm-research/line-level-defect-prediction).
@@ -33,14 +35,14 @@ The following parameters are used to train our BARLineDP model.
 - `bafn_hidden_dim` = 256
 - `dropout` = 0.2
 - `lr (learning rate)` = 0.001
-- `k (balance hyperparameter)` = 0.85
+- `k (balance hyperparameter)` = 0.2 if within-domain else 0.3
 
 ### Code Preprocessing
 1. Download the datasets from the [github](https://github.com/awsm-research/line-level-defect-prediction) and keep them in `datasets/original/`.
 
 2. Run the following command to prepare data for model training. The output will be stored in `datasets/preprocessed_data/`.
 
-		python code_preprocessing.py
+	`python code_preprocessing.py`
 
 ### BARLineDP Model Training
 To train BARLineDP model for each project, run the following command. The trained models will be saved in `output/model/BARLineDP/`, and the loss will be saved in `output/loss/BARLineDP/`.
@@ -63,6 +65,6 @@ The generated outputs of cross-prediction are stored in `output/prediction/BARLi
 ### Get the Evaluation Results
 To obtain file-level and line-level defect prediction results within WPDP and CPDP scenarios, you need to set the absolute working path for the script to run first, and then execute the following command.
 
-	Rscript  get_results.R
+	Rscript get_results.R
 
 The results are stored in `output/result/BARLineDP/`.

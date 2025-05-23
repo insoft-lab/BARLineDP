@@ -56,7 +56,6 @@ def predict_defective_files_in_releases(args, dataset_name):
     train_rel = all_train_releases[dataset_name]
     test_rel = all_eval_releases[dataset_name][1:]
 
-    # load the pre-trained CodeBERT model
     MODEL_CLASSES = {'roberta': (RobertaConfig, RobertaModel, RobertaTokenizer)}
     config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
     config = config_class.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
@@ -86,7 +85,6 @@ def predict_defective_files_in_releases(args, dataset_name):
 
     checkpoint = torch.load(actual_save_model_dir + 'best_model.pth')
     model.load_state_dict(checkpoint['model_state_dict'])
-
     sig = nn.Sigmoid()
 
     codebert.to(args.device)
@@ -108,12 +106,6 @@ def predict_defective_files_in_releases(args, dataset_name):
             is_comments = df['is_comment'].tolist()
 
             code = df['code_line'].tolist()
-
-            # avoid memory overflow
-            drop_length = 35000
-            if len(code) > drop_length:
-                continue
-
             code2d = prepare_code2d(code, True)
             code3d = [code2d]
             codevec = TextDataset(tokenizer, args, code3d, [file_label])
@@ -168,7 +160,7 @@ def predict_defective_files_in_releases(args, dataset_name):
 def main():
     arg = argparse.ArgumentParser()
 
-    arg.add_argument('-file_lvl_gt', type=str, default='datasets/preprocessed_data/',
+    arg.add_argument('-file_lvl_gt', type=str, default='../datasets/preprocessed_data/',
                      help='the directory of preprocessed data')
     arg.add_argument('-save_model_dir', type=str, default='output/model/BARLineDP/',
                      help='the save directory of model')
@@ -185,22 +177,21 @@ def main():
     arg.add_argument('-dropout', type=float, default=0.2, help='dropout rate')
 
     arg.add_argument('-model_type', type=str, default='roberta', help='the token embedding model')
-    arg.add_argument('-model_name_or_path', type=str, default='microsoft/codebert-base',
+    arg.add_argument('-model_name_or_path', type=str, default='../microsoft/codebert-base',
                      help='the model checkpoint for weights initialization')
     arg.add_argument('-config_name', type=str, default=None,
                      help='optional pretrained config name or path if not the same as model_name_or_path')
-    arg.add_argument('-tokenizer_name', type=str, default='microsoft/codebert-base',
+    arg.add_argument('-tokenizer_name', type=str, default='../microsoft/codebert-base',
                      help='optional pretrained tokenizer name or path if not the same as model_name_or_path')
     arg.add_argument('-cache_dir', type=str, default=None,
                      help='optional directory to store the pre-trained models')
-    arg.add_argument('-block_size', type=int, default=75,
+    arg.add_argument('-block_size', type=int, default=100,
                      help='the training dataset will be truncated in block of this size for training')
     arg.add_argument('-do_lower_case', action='store_true', help='set this flag if you are using an uncased model')
 
     args = arg.parse_args()
 
     args.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
     set_seed(args.seed)
 
     if not os.path.exists(args.prediction_dir):

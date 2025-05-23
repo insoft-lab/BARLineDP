@@ -78,14 +78,18 @@ def get_loss_weight(labels, weight_dict, mode=None):
     return weight_tensor
 
 
-def kld(p, q):
-    return (p * torch.log2(p / q)).sum()
+def kld(p, q, discounts):
+    return (p * torch.log2(p / q) * discounts).sum()
 
 
-def jsd(pred, gt):
+def jsd(pred, gt, epsilon=1e-8):
     top1_pred = F.softmax(pred, dim=-1)
     top1_gt = F.softmax(gt, dim=-1)
-    jsd = 0.5 * kld(top1_pred, top1_gt) + 0.5 * kld(top1_gt, top1_pred)
+    m = 0.5 * (top1_pred + top1_gt + epsilon)
+    sorted_indices = torch.argsort(gt, dim=-1, descending=True)
+    ranks = torch.argsort(sorted_indices, dim=-1) + 1
+    discounts = 1.0 / torch.log2(ranks.float() + 1)
+    jsd = 0.5 * (kld(top1_pred, m, discounts) + kld(top1_gt, m, discounts))
     return jsd
 
 
@@ -107,14 +111,12 @@ def train_model(args, dataset_name):
     train_code3d, train_label, train_line_label = get_code3d_and_label(train_df, True, args.max_train_LOC)
     valid_code3d, valid_label, valid_line_label = get_code3d_and_label(valid_df, True, args.max_train_LOC)
 
-    # apply weighted loss to handle class imbalance
     sample_weights = compute_class_weight(class_weight='balanced', classes=np.unique(train_label), y=train_label)
 
     weight_dict = {}
     weight_dict['defect'] = np.max(sample_weights)
     weight_dict['clean'] = np.min(sample_weights)
 
-    # load the pre-trained CodeBERT model
     MODEL_CLASSES = {'roberta': (RobertaConfig, RobertaModel, RobertaTokenizer)}
     config_class, model_class, tokenizer_class = MODEL_CLASSES[args.model_type]
     config = config_class.from_pretrained(args.config_name if args.config_name else args.model_name_or_path,
@@ -145,7 +147,6 @@ def train_model(args, dataset_name):
     codebert.to(args.device)
     model.to(args.device)
 
-    # convert input format as required by CodeBERT
     x_train_vec = TextDataset(tokenizer, args, train_code3d, train_label, train_line_label)
     x_valid_vec = TextDataset(tokenizer, args, valid_code3d, valid_label, valid_line_label)
 
@@ -170,7 +171,6 @@ def train_model(args, dataset_name):
         train_losses = []
         val_losses = []
 
-        # training model
         model.train()
         for step, batch in tqdm(enumerate(train_dl), total=len(train_dl), desc='Train Loop'):
             inputs = [item[0] for item in batch]
@@ -179,7 +179,6 @@ def train_model(args, dataset_name):
 
             labels = torch.tensor(labels)
 
-            # initial acquisition of code line semantics
             cov_inputs = []
             with torch.no_grad():
                 for item in inputs:
@@ -193,47 +192,44 @@ def train_model(args, dataset_name):
             output, line_atts = model(cov_inputs)
             file_loss = criterion_file(output, labels.reshape(args.batch_size, 1).to(args.device))
 
-            # ranking optimization
-            line_atts = F.normalize(line_atts, p=2, dim=1)
+            att_mins = line_atts.min(dim=1, keepdim=True).values
+            att_maxs = line_atts.max(dim=1, keepdim=True).values
+            line_atts = (line_atts - att_mins) / (att_maxs - att_mins)
+
+            cnt = 0
             train_line_losses = []
-            for att, line_label in zip(line_atts, line_labels):
+            for att, line_label, file_label in zip(line_atts, line_labels, labels):
+                if file_label == 0. or not any(x == 1.0 for x in line_label):
+                    continue
+                cnt += 1
                 att = att[:len(line_label)]
+                top_k = int(0.2 * len(line_label))
                 sorted_att, sorted_indices = att.sort(descending=True, dim=-1)
-
-                limit_length = int(0.2 * len(sorted_att))
-                sorted_att = sorted_att[:limit_length]
-                sorted_indices = sorted_indices[:limit_length]
-
-                line_label = line_label[sorted_indices]
-
-                sorted_att = sorted_att.unsqueeze(0)
-                line_label = line_label.unsqueeze(0).to(args.device)
-
-                # calculate ListNet ranking loss
+                sorted_att = sorted_att[:top_k]
+                sorted_indices = sorted_indices[:top_k]
+                line_label = line_label[sorted_indices].to(args.device)
                 line_loss = jsd(sorted_att, line_label)
                 train_line_losses.append(line_loss)
 
-            line_loss = torch.mean(torch.stack(train_line_losses), dim=0)
+            if len(train_line_losses) > 0:
+                line_loss = torch.mean(torch.stack(train_line_losses), dim=0)
+            else:
+                line_loss = 0.
 
-            # calculate composite loss
-            k = 0.85
-            loss = k * file_loss + (1 - k) * line_loss
+            k = args.k * (cnt / len(labels))
+            loss = (1 - k) * file_loss + k * line_loss
             train_losses.append(loss.item())
 
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
-
-            # gradient clipping to prevent gradient explosion
             nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
             torch.cuda.empty_cache()
 
         train_loss_all_epochs.append(np.mean(train_losses))
-
         outputs = []
         outputs_labels = []
 
-        # evaluating model
         with torch.no_grad():
             criterion_file.weight = None
             model.eval()
@@ -252,40 +248,40 @@ def train_model(args, dataset_name):
                     )
 
                 output, line_atts = model(cov_inputs)
-
-                line_atts = F.normalize(line_atts, p=2, dim=1)
-
                 outputs.append(sig(output))
                 outputs_labels.append(labels)
-
                 val_file_loss = criterion_file(output, labels.reshape(len(labels), 1).to(args.device))
 
+                att_mins = line_atts.min(dim=1, keepdim=True).values
+                att_maxs = line_atts.max(dim=1, keepdim=True).values
+                line_atts = (line_atts - att_mins) / (att_maxs - att_mins)
+
+                cnt = 0
                 val_line_losses = []
-                for att, line_label in zip(line_atts, line_labels):
+                for att, line_label, file_label in zip(line_atts, line_labels, labels):
+                    if file_label == 0. or not any(x == 1.0 for x in line_label):
+                        continue
+                    cnt += 1
                     att = att[:len(line_label)]
+                    top_k = int(0.2 * len(line_label))
                     sorted_att, sorted_indices = att.sort(descending=True, dim=-1)
-
-                    limit_length = int(0.2 * len(sorted_att))
-                    sorted_att = sorted_att[:limit_length]
-                    sorted_indices = sorted_indices[:limit_length]
-
-                    line_label = line_label[sorted_indices]
-
-                    sorted_att = sorted_att.unsqueeze(0)
-                    line_label = line_label.unsqueeze(0).to(args.device)
-
+                    sorted_att = sorted_att[:top_k]
+                    sorted_indices = sorted_indices[:top_k]
+                    line_label = line_label[sorted_indices].to(args.device)
                     val_line_loss = jsd(sorted_att, line_label)
                     val_line_losses.append(val_line_loss)
 
-                val_line_loss = torch.mean(torch.stack(val_line_losses), dim=0)
+                if len(val_line_losses) > 0:
+                    val_line_loss = torch.mean(torch.stack(val_line_losses), dim=0)
+                else:
+                    val_line_loss = 0.
 
-                k = 0.85
-                val_loss = k * val_file_loss + (1 - k) * val_line_loss
+                k = args.k * (cnt / len(labels))
+                val_loss = (1 - k) * val_file_loss + k * val_line_loss
                 val_losses.append(val_loss.item())
 
         val_loss_all_epochs.append(np.mean(val_losses))
 
-        # compute the metric of AUC
         y_prob = torch.cat(outputs)
         y_gt = torch.cat(outputs_labels)
 
@@ -301,10 +297,8 @@ def train_model(args, dataset_name):
         print('Validation at Epoch ' + str(epoch) + ' with validation loss ' + str(np.mean(val_losses)),
               ' AUC ' + str(valid_auc))
 
-        # save the best model
         if epoch % args.num_epochs == 0:
             print('The training step of ' + dataset_name + ' is finished!')
-
             torch.save({'epoch': best_epoch,
                         'model_state_dict': best_model.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict()},
@@ -321,7 +315,7 @@ def train_model(args, dataset_name):
 def main():
     arg = argparse.ArgumentParser()
 
-    arg.add_argument('-file_lvl_gt', type=str, default='datasets/preprocessed_data/',
+    arg.add_argument('-file_lvl_gt', type=str, default='../datasets/preprocessed_data/',
                      help='the directory of preprocessed data')
     arg.add_argument('-save_model_dir', type=str, default='output/model/BARLineDP/',
                      help='the save directory of model')
@@ -335,29 +329,29 @@ def main():
     arg.add_argument('-gru_num_layers', type=int, default=1, help='number of GRU layer')
     arg.add_argument('-bafn_hidden_dim', type=int, default=256, help='output dimension of BAFN')
     arg.add_argument('-max_grad_norm', type=int, default=5, help='max gradient norm')
-    arg.add_argument('-max_train_LOC', type=int, default=900, help='max LOC of training/validation data')
+    arg.add_argument('-max_train_LOC', type=int, default=1000, help='max LOC of training/validation data')
     arg.add_argument('-use_layer_norm', type=bool, default=True, help='weather to use layer normalization')
     arg.add_argument('-dropout', type=float, default=0.2, help='dropout rate')
     arg.add_argument('-lr', type=float, default=0.001, help='learning rate')
+    arg.add_argument('-k', type=float, default=0.2, help='balance hyperparameter')
     arg.add_argument('-seed', type=int, default=0, help='random seed for initialization')
     arg.add_argument('-weight_decay', type=float, default=0.0, help='weight decay whether apply some')
 
     arg.add_argument('-model_type', type=str, default='roberta', help='the token embedding model')
-    arg.add_argument('-model_name_or_path', type=str, default='microsoft/codebert-base',
+    arg.add_argument('-model_name_or_path', type=str, default='../microsoft/codebert-base',
                      help='the model checkpoint for weights initialization')
     arg.add_argument('-config_name', type=str, default=None,
                      help='optional pretrained config name or path if not the same as model_name_or_path')
-    arg.add_argument('-tokenizer_name', type=str, default='microsoft/codebert-base',
+    arg.add_argument('-tokenizer_name', type=str, default='../microsoft/codebert-base',
                      help='optional pretrained tokenizer name or path if not the same as model_name_or_path')
     arg.add_argument('-cache_dir', type=str, default=None,
                      help='optional directory to store the pre-trained models')
-    arg.add_argument('-block_size', type=int, default=75,
+    arg.add_argument('-block_size', type=int, default=100,
                      help='the training dataset will be truncated in block of this size for training')
     arg.add_argument('-do_lower_case', action='store_true', help='set this flag if you are using an uncased model')
 
     args = arg.parse_args()
     args.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
     set_seed(args.seed)
 
     dataset_names = list(all_releases.keys())

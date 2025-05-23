@@ -7,8 +7,7 @@ library(pROC)
 library(effsize)
 library(progress)
 
-# configure your absolute work path
-setwd("The path where you save the results")
+setwd("your work path")
 
 get.file.level.metrics <- function(df) {
   all.gt <- df$file.level.ground.truth
@@ -19,20 +18,23 @@ get.file.level.metrics <- function(df) {
   all.gt <- as.factor(all.gt)
 
   confusion.mat <- confusionMatrix(all.pred, reference = all.gt)
+  TPR <- confusion.mat$byClass["Sensitivity"]
+  TNR <- confusion.mat$byClass["Specificity"]
 
   BA <- confusion.mat$byClass["Balanced Accuracy"]
   AUC <- pROC::auc(all.gt, all.prob)
+  GM <- sqrt(TPR * TNR)
 
   all.pred <- ifelse(all.pred == "False", 0, ifelse(all.pred == "True", 1, all.pred))
   all.gt <- ifelse(all.gt == "False", 0, ifelse(all.gt == "True", 1, all.gt))
 
   MCC <- mcc(all.gt, all.pred, cutoff = 0.5)
-
-  if (is.nan(MCC)) {
+  if(is.nan(MCC))
+  {
     MCC <- 0
   }
 
-  file.eval.result <- c(AUC, MCC, BA)
+  file.eval.result <- c(AUC, MCC, BA, GM)
 
   return(file.eval.result)
 }
@@ -50,7 +52,6 @@ get.line.level.metrics <- function(df) {
     summarize(total_true = sum(line.level.ground.truth == "True")) %>%
     ungroup()
 
-  # calculate Recall@Top20%LOC
   Recall20LOC <- sorted %>%
     group_by(test, filename) %>%
     mutate(effort = round(order / n(), digits = 2 )) %>%
@@ -60,7 +61,6 @@ get.line.level.metrics <- function(df) {
     mutate(Recall20LOC = correct_pred / total_true) %>%
     ungroup()
 
-  # calculate Effort@Top20%Recall
   Effort20Recall <- sorted %>%
     merge(total_true) %>%
     group_by(test, filename) %>%
@@ -72,7 +72,6 @@ get.line.level.metrics <- function(df) {
   Effort20Recall$Target <- sub('-.*', '', Effort20Recall$test)
 
   line.eval.result <- list(Recall20LOC, Effort20Recall)
-
   return(line.eval.result)
 }
 
@@ -81,6 +80,7 @@ get.file.results <- function (prediction.dir, mode, src = NULL) {
   all.auc <- NULL
   all.mcc <- NULL
   all.ba <- NULL
+  all.gm <- NULL
   all.target <- NULL
 
   pb <- progress_bar$new(
@@ -100,6 +100,7 @@ get.file.results <- function (prediction.dir, mode, src = NULL) {
     all.auc <- append(all.auc, file.level.result[1])
     all.mcc <- append(all.mcc, file.level.result[2])
     all.ba <- append(all.ba, file.level.result[3])
+    all.gm <- append(all.gm, file.level.result[4])
 
     f.split <- strsplit(f, '-')[[1]]
 
@@ -113,14 +114,14 @@ get.file.results <- function (prediction.dir, mode, src = NULL) {
     Sys.sleep(0.05)
   }
 
-  results <- data.frame(Target = all.target, AUC = all.auc, MCC = all.mcc, BA = all.ba)
+  results <- data.frame(Target = all.target, AUC = all.auc, MCC = all.mcc, BA = all.ba, GM = all.gm)
 
   if (!is.null(src)) {
     results <- data.frame(Src = src, results)
   } else {
     results <- results %>%
       group_by(Target) %>%
-      summarise(AUC = mean(AUC), MCC = mean(MCC), BA = mean(BA)) %>%
+      summarise(AUC = mean(AUC), MCC = mean(MCC), BA = mean(BA), GM = mean(GM)) %>%
       ungroup()
   }
 
@@ -146,12 +147,11 @@ get.line.results <- function (prediction.dir, mode, src = NULL) {
     Sys.sleep(0.05)
   }
 
-  # set the line attention of comment lines to 0
   df.all[df.all$is.comment.line == "True",]$line.attention.score <- 0
 
   line.level.result <- get.line.level.metrics(df.all)
-  Recall20LOC <- line.level.result[[2]]
-  Effort20Recall <- line.level.result[[3]]
+  Recall20LOC <- line.level.result[[1]]
+  Effort20Recall <- line.level.result[[2]]
 
   if (mode == 'cross' && !is.null(src)) {
     results <- data.frame(
@@ -181,13 +181,11 @@ get.line.results <- function (prediction.dir, mode, src = NULL) {
   return(results)
 }
 
-# compute the results of WPDP
 prediction.dir.within <- 'output/prediction/BARLineDP/within-release/'
 print('In-domain result processing...')
 within.file.level.results <- get.file.results(prediction.dir.within, 'within')
 within.line.level.results <- get.line.results(prediction.dir.within, 'within')
 
-# compute the results of CPDP
 prediction.dir.cross <- 'output/prediction/BARLineDP/cross-release/'
 print('Cross-domain result processing...')
 cross.file.level.results <- NULL
@@ -203,7 +201,7 @@ for (p in projs) {
 
 cross.file.level.results <- cross.file.level.results %>%
   group_by(Target) %>%
-  summarise(AUC = mean(AUC), MCC = mean(MCC), BA = mean(BA)) %>%
+  summarise(AUC = mean(AUC), MCC = mean(MCC), BA = mean(BA), GM = mean(GM)) %>%
   ungroup()
 
 cross.line.level.results <- cross.line.level.results %>%
